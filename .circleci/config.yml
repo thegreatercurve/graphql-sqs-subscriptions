@@ -1,0 +1,64 @@
+version: 2
+
+default_image: &default_image
+  working_directory: ~/repo
+  docker:
+    - image: circleci/node:12.6.0
+
+default_filters: &default_filters
+  filters:
+    tags:
+      only: /v.*/
+    branches:
+      only: /.*/
+
+jobs:
+  install:
+    <<: *default_image
+    steps:
+      - checkout
+      - restore_cache:
+          key: dependency-cache-{{ checksum "package.json" }}
+      - run: npm install
+      - save_cache:
+          paths:
+            - node_modules
+          key: dependency-cache-{{ checksum "package.json" }}
+      - persist_to_workspace:
+          root: ~/repo
+          paths: .
+
+  check_formatting:
+    <<: *default_image
+    steps:
+      - attach_workspace:
+          at: ~/repo
+      - run: npm run format:check
+
+  publish_npm:
+    <<: *default_image
+    steps:
+      - attach_workspace:
+          at: ~/repo
+      - run: echo "//registry.npmjs.org/:_authToken=$NPM_TOKEN" > ~/repo/.npmrc
+      - run: npm publish
+
+workflows:
+  version: 2
+  build_deploy:
+    jobs:
+      - install:
+          <<: *default_filters
+      - check_formatting:
+          <<: *default_filters
+          requires:
+            - install
+      - publish_npm:
+          context: npm-user
+          requires:
+            - check_formatting
+          filters:
+            tags:
+              only: /v.*/
+            branches:
+              ignore: /.*/
