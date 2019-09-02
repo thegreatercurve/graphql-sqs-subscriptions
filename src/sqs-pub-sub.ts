@@ -1,6 +1,6 @@
-import { AWSError, SQS } from "aws-sdk";
 import { PubSubEngine } from "graphql-subscriptions";
 import { PubSubAsyncIterator } from "graphql-subscriptions/dist/pubsub-async-iterator";
+import { AWSError, SQS } from "aws-sdk";
 import { delay } from "./utils";
 
 const AWS_SDK_API_VERSION = "2012-11-05";
@@ -56,7 +56,7 @@ export class SQSPubSub implements PubSubEngine {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public publish = async (triggerName: string, payload: any): Promise<void> => {
-    if (this.triggerName) {
+    if (!this.triggerName) {
       this.triggerName = triggerName;
     }
 
@@ -89,7 +89,7 @@ export class SQSPubSub implements PubSubEngine {
     onMessage: Function,
     options?: SQS.Types.ReceiveMessageRequest
   ): Promise<number> => {
-    if (this.triggerName) {
+    if (!this.triggerName) {
       this.triggerName = triggerName;
     }
 
@@ -113,7 +113,7 @@ export class SQSPubSub implements PubSubEngine {
     options: SQS.Types.ReceiveMessageRequest
   ): Promise<void> => {
     const params = {
-      ...(options || options),
+      ...(options || {}),
       MessageAttributeNames: [PUB_SUB_MESSAGE_ATTRIBUTE],
       QueueUrl: this.queueUrl,
       VisibilityTimeout: 0
