@@ -1,38 +1,67 @@
+import aws, { AWSError, SQS } from "aws-sdk";
 import { PubSubEngine } from "graphql-subscriptions";
 import { PubSubAsyncIterator } from "graphql-subscriptions/dist/pubsub-async-iterator";
-import { AWSError, SQS } from "aws-sdk";
-import { delay } from "./utils";
+import uuid from "uuid";
+import { errorHandler } from "./utils";
 
 const AWS_SDK_API_VERSION = "2012-11-05";
 const PUB_SUB_MESSAGE_ATTRIBUTE = "SQSPubSubTriggerName";
 
-interface PubSubOptions {
-  queueUrl: string;
-  receiveMessageTimeout?: number;
-}
-
 export class SQSPubSub implements PubSubEngine {
   public sqs: SQS;
 
-  private readonly receiveMessageTimeout: number;
-  private readonly queueUrl: string;
+  private queueUrl: string;
   private stopped: boolean;
   private triggerName: string;
 
-  public constructor(
-    { queueUrl, receiveMessageTimeout = 0 }: PubSubOptions,
-    config: SQS.Types.ClientConfiguration = {}
-  ) {
-    this.sqs = new SQS({ apiVersion: AWS_SDK_API_VERSION });
+  public constructor(config: SQS.Types.ClientConfiguration = {}) {
+    aws.config.update(config);
 
-    this.sqs.config.update(config);
-
-    this.queueUrl = queueUrl;
-    this.receiveMessageTimeout = receiveMessageTimeout;
+    this.sqs = new aws.SQS({ apiVersion: AWS_SDK_API_VERSION });
   }
 
   public asyncIterator = <T>(triggers: string | string[]): AsyncIterator<T> => {
     return new PubSubAsyncIterator<T>(this, triggers);
+  };
+
+  public createQueue = async (): Promise<void> => {
+    const params = {
+      QueueName: `${process.env.NODE_ENV || "local"}-${uuid()}.fifo`,
+      Attributes: {
+        FifoQueue: "true"
+      }
+    };
+
+    try {
+      await this.sqs
+        .createQueue(
+          params,
+          (err: AWSError, { QueueUrl = "" }: SQS.Types.CreateQueueResult) => {
+            if (err) {
+              console.error(err);
+            }
+
+            this.queueUrl = QueueUrl;
+          }
+        )
+        .promise();
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  public deleteQueue = async (): Promise<void> => {
+    const params = {
+      QueueUrl: this.queueUrl
+    };
+
+    try {
+      await this.sqs.deleteQueue(params, errorHandler).promise();
+
+      this.queueUrl = null;
+    } catch (error) {
+      console.error(error);
+    }
   };
 
   public deleteMessage = async (receiptHandle: string): Promise<void> => {
@@ -42,119 +71,109 @@ export class SQSPubSub implements PubSubEngine {
     };
 
     try {
-      await this.sqs
-        .deleteMessage(params, (err: AWSError) => {
-          if (err) {
-            throw err;
-          }
-        })
-        .promise();
+      await this.sqs.deleteMessage(params, errorHandler).promise();
     } catch (error) {
-      throw Error(error.message);
+      console.error(error);
     }
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   public publish = async (triggerName: string, payload: any): Promise<void> => {
-    if (!this.triggerName) {
-      this.triggerName = triggerName;
-    }
-
-    const params: SQS.Types.SendMessageRequest = {
-      QueueUrl: this.queueUrl,
-      MessageAttributes: {
-        [PUB_SUB_MESSAGE_ATTRIBUTE]: {
-          DataType: "String",
-          StringValue: this.triggerName
-        }
-      },
-      MessageBody: JSON.stringify(payload)
-    };
-
     try {
-      await this.sqs
-        .sendMessage(params, (err: AWSError) => {
-          if (err) {
-            throw err;
+      if (!this.queueUrl) {
+        await this.createQueue();
+      }
+
+      const params: SQS.Types.SendMessageRequest = {
+        QueueUrl: this.queueUrl,
+        MessageBody: JSON.stringify(payload),
+        MessageGroupId: triggerName,
+        MessageDeduplicationId: uuid(),
+        MessageAttributes: {
+          [PUB_SUB_MESSAGE_ATTRIBUTE]: {
+            DataType: "String",
+            StringValue: triggerName
           }
-        })
-        .promise();
+        }
+      };
+
+      await this.sqs.sendMessage(params, errorHandler).promise();
     } catch (error) {
-      throw Error(error.message);
+      console.error(error);
     }
   };
 
   public subscribe = (
     triggerName: string,
-    onMessage: Function,
-    options?: SQS.Types.ReceiveMessageRequest
+    onMessage: Function
   ): Promise<number> => {
-    if (!this.triggerName) {
-      this.triggerName = triggerName;
-    }
-
     try {
-      this.poll(onMessage, options);
+      this.poll(triggerName, onMessage);
 
       return Promise.resolve(1);
     } catch (error) {
-      throw Error(error.message);
+      console.error(error);
     }
   };
 
-  public unsubscribe = (): void => {
-    if (this.stopped) {
+  public unsubscribe = async (): Promise<void> => {
+    if (!this.stopped) {
       this.stopped = true;
+
+      try {
+        await this.deleteQueue();
+      } catch (error) {
+        console.error(error);
+      }
+
+      this.stopped = false;
     }
   };
 
   private readonly poll = async (
-    onMessage: Function,
-    options: SQS.Types.ReceiveMessageRequest
+    triggerName: string,
+    onMessage: Function
   ): Promise<void> => {
-    const params = {
-      ...(options || {}),
-      MessageAttributeNames: [PUB_SUB_MESSAGE_ATTRIBUTE],
-      QueueUrl: this.queueUrl,
-      VisibilityTimeout: 0
-    };
-
-    const data = await this.receiveMessage(params);
-
-    if (
-      data.Messages &&
-      data.Messages.length > 0 &&
-      data.Messages[0].MessageAttributes[PUB_SUB_MESSAGE_ATTRIBUTE]
-        .StringValue === this.triggerName
-    ) {
-      await this.deleteMessage(data.Messages[0].ReceiptHandle);
-
-      onMessage(JSON.parse(data.Messages[0].Body));
-    }
-
     if (this.stopped) {
       return;
     }
 
-    await delay(
-      () => this.poll(onMessage, options),
-      this.receiveMessageTimeout
-    );
+    try {
+      if (!this.queueUrl) {
+        await this.createQueue();
+      }
+
+      const params = {
+        MessageAttributeNames: [PUB_SUB_MESSAGE_ATTRIBUTE],
+        QueueUrl: this.queueUrl
+      };
+
+      const data = await this.receiveMessage(params);
+
+      if (
+        data &&
+        data.Messages &&
+        data.Messages[0].MessageAttributes[PUB_SUB_MESSAGE_ATTRIBUTE]
+          .StringValue === triggerName
+      ) {
+        await this.deleteMessage(data.Messages[0].ReceiptHandle);
+
+        onMessage(JSON.parse(data.Messages[0].Body));
+      }
+    } catch (error) {
+      console.error(error);
+    }
+
+    setImmediate(() => this.poll(triggerName, onMessage));
   };
 
   private readonly receiveMessage = async (
     params: SQS.Types.ReceiveMessageRequest
   ): Promise<SQS.Types.ReceiveMessageResult> => {
     try {
-      return await this.sqs
-        .receiveMessage(params, (err: AWSError) => {
-          if (err) {
-            throw err;
-          }
-        })
-        .promise();
+      return await this.sqs.receiveMessage(params, errorHandler).promise();
     } catch (error) {
-      throw Error(error.message);
+      console.error(error);
     }
   };
 }

@@ -1,4 +1,7 @@
-export const delay = (cb: Function, timeout: number): Promise<unknown> =>
-  new Promise(
-    (resolve): NodeJS.Timeout => setTimeout(() => resolve(cb()), timeout)
-  );
+import { AWSError } from "aws-sdk";
+
+export const errorHandler = (err: AWSError): void => {
+  if (err) {
+    console.error(err);
+  }
+};
